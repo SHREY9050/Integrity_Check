@@ -176,6 +176,13 @@ with tab_live:
 
             start_btn = st.button("🚀 Start Verification Pipeline", type="primary", use_container_width=True)
 
+            # Keep the temporary upload only while the verification button is running.
+            if not start_btn and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError:
+                    pass
+
     with col2:
         st.subheader("2. Pipeline Stages & Verdict")
         if uploaded_file and meta is not None and 'start_btn' in locals() and start_btn:
@@ -203,6 +210,11 @@ with tab_live:
                     st.error(f"⛔ **MALWARE DETECTED:** {vt_res.malicious_count} engines flagged this binary as malicious!")
                     st.warning(vt_res.ai_explanation or "Execution halted immediately.")
                     status.update(label="Malware Detected! Execution Halted.", state="error")
+                    try:
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                    except OSError:
+                        pass
                     st.stop()
                 elif vt_res.status == ThreatStatus.CLEAN:
                     append_ui_log(
