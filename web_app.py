@@ -204,12 +204,25 @@ with tab_live:
                     st.warning(vt_res.ai_explanation or "Execution halted immediately.")
                     status.update(label="Malware Detected! Execution Halted.", state="error")
                     st.stop()
+                elif vt_res.status == ThreatStatus.CLEAN:
+                    append_ui_log(
+                        f"VirusTotal: No malicious detections reported "
+                        f"({vt_res.malicious_count}/{vt_res.total_engines})."
+                    )
+                    st.write(
+                        "✅ **Step 1:** VirusTotal reports no malicious detections. "
+                        "This alone does not prove the file is safe."
+                    )
                 elif vt_res.status == ThreatStatus.NOT_FOUND_404:
-                    append_ui_log("VirusTotal 404 Not Found (New/uncataloged point release). Cascading to Stage 2...")
-                    st.write("⚠️ **Step 1 Notice:** Signature not in threat DB (404 Not Found). Cascading to Stage 2...")
+                    append_ui_log("VirusTotal 404 Not Found (not in threat registry). Cascading to Stage 2...")
+                    st.warning("⚠️ **Step 1 Notice:** VirusTotal has no record for this file. This is not a clean verdict.")
                 else:
-                    append_ui_log("VirusTotal: Clean / Unflagged signature.")
-                    st.write("✅ **Step 1 Clean:** No known threat flags found.")
+                    error_text = vt_res.error_message or vt_res.status.value
+                    append_ui_log(f"VirusTotal could not complete the check: {error_text}")
+                    st.warning(
+                        f"⚠️ **Step 1 Inconclusive:** {error_text}. "
+                        "Continuing to Stage 2, but this is not a malware-free result."
+                    )
 
                 # Step 2
                 append_ui_log("Step 2: Crawling vendor documentation via Tavily Web RAG...")
