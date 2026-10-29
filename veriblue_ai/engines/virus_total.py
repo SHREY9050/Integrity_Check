@@ -10,6 +10,7 @@ Handles conditional routing:
 from enum import Enum
 from typing import Dict, Any, Optional
 import requests
+import re
 try:
     from ..config import Config
 except (ImportError, ValueError):
@@ -90,13 +91,21 @@ class VirusTotalEngine:
                 error_message="VirusTotal API key not configured in settings.",
             )
 
+        normalized_hash = str(sha256_hash).strip().lower()
+        if not re.fullmatch(r"[0-9a-f]{64}", normalized_hash):
+            return VirusTotalResult(
+                status=ThreatStatus.API_ERROR,
+                hash_string=sha256_hash,
+                error_message="Invalid SHA-256 value; expected exactly 64 hexadecimal characters.",
+            )
+
         headers = {
             "x-apikey": api_key,
             "Accept": "application/json",
             "User-Agent": "VeriBlue-AI/1.0",
         }
 
-        url = f"{self.VT_BASE_URL}{sha256_hash.strip().lower()}"
+        url = f"{self.VT_BASE_URL}{normalized_hash}"
 
         try:
             response = requests.get(url, headers=headers, timeout=Config.get_http_timeout())
@@ -125,12 +134,34 @@ class VirusTotalEngine:
 
             payload = response.json()
             attributes = payload.get("data", {}).get("attributes", {})
-            stats = attributes.get("last_analysis_stats", {})
+            stats = attributes.get("last_analysis_stats")
+            if not isinstance(stats, dict) or not stats:
+                return VirusTotalResult(
+                    status=ThreatStatus.API_ERROR,
+                    hash_string=normalized_hash,
+                    raw_json=payload,
+                    error_message="VirusTotal returned no usable analysis statistics; threat status is inconclusive.",
+                )
 
-            malicious = stats.get("malicious", 0)
-            suspicious = stats.get("suspicious", 0)
-            harmless = stats.get("harmless", 0)
-            undetected = stats.get("undetected", 0)
+            malicious = int(stats.get("malicious", 0) or 0)
+            suspicious = int(stats.get("suspicious", 0) or 0)
+            harmless = int(stats.get("harmless", 0) or 0)
+            undetected = int(stats.get("undetected", 0) or 0)
+
+            if suspicious > 0 and malicious == 0:
+                return VirusTotalResult(
+                    status=ThreatStatus.API_ERROR,
+                    hash_string=normalized_hash,
+                    malicious_count=malicious,
+                    suspicious_count=suspicious,
+                    harmless_count=harmless,
+                    undetected_count=undetected,
+                    raw_json=payload,
+                    error_message=(
+                        f"VirusTotal reported {suspicious} suspicious detection(s). "
+                        "Treat this file as untrusted until reviewed."
+                    ),
+                )
 
             # If Malicious > 0: execution halts immediately. Route JSON to AI Explainer.
             if malicious > 0:
@@ -159,11 +190,11 @@ class VirusTotalEngine:
                 raw_json=payload,
             )
 
-        except requests.RequestException as e:
+        except (requests.RequestException, ValueError, TypeError, AttributeError) as e:
             return VirusTotalResult(
                 status=ThreatStatus.API_ERROR,
-                hash_string=sha256_hash,
-                error_message=f"Network error contacting VirusTotal: {str(e)}",
+                hash_string=normalized_hash,
+                error_message=f"Could not reliably parse VirusTotal response: {str(e)}",
             )
 
     def _explain_malware_with_llm(

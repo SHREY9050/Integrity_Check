@@ -1126,7 +1126,7 @@ class VeriBlueApp(BaseRootWindow):
         """Displays green confirmation dashboard."""
         self.verdict_canvas.configure(border_color="#22C55E")
         self.verdict_title.configure(
-            text="✅ GENUINE, CLEAN DEPLOYMENT VERIFIED",
+            text="✅ INTEGRITY MATCHED TO VENDOR CHECKSUM",
             text_color="#22C55E",
         )
         body = (

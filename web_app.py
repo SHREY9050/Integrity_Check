@@ -176,9 +176,16 @@ with tab_live:
 
             start_btn = st.button("🚀 Start Verification Pipeline", type="primary", use_container_width=True)
 
+            # Keep the temporary upload only while the verification button is running.
+            if not start_btn and os.path.exists(temp_file_path):
+                try:
+                    os.remove(temp_file_path)
+                except OSError:
+                    pass
+
     with col2:
         st.subheader("2. Pipeline Stages & Verdict")
-        if uploaded_file and 'start_btn' in locals() and start_btn:
+        if uploaded_file and meta is not None and 'start_btn' in locals() and start_btn:
             log_container = st.empty()
             logs = []
 
@@ -203,13 +210,31 @@ with tab_live:
                     st.error(f"⛔ **MALWARE DETECTED:** {vt_res.malicious_count} engines flagged this binary as malicious!")
                     st.warning(vt_res.ai_explanation or "Execution halted immediately.")
                     status.update(label="Malware Detected! Execution Halted.", state="error")
+                    try:
+                        if os.path.exists(temp_file_path):
+                            os.remove(temp_file_path)
+                    except OSError:
+                        pass
                     st.stop()
+                elif vt_res.status == ThreatStatus.CLEAN:
+                    append_ui_log(
+                        f"VirusTotal: No malicious detections reported "
+                        f"({vt_res.malicious_count}/{vt_res.total_engines})."
+                    )
+                    st.write(
+                        "✅ **Step 1:** VirusTotal reports no malicious detections. "
+                        "This alone does not prove the file is safe."
+                    )
                 elif vt_res.status == ThreatStatus.NOT_FOUND_404:
-                    append_ui_log("VirusTotal 404 Not Found (New/uncataloged point release). Cascading to Stage 2...")
-                    st.write("⚠️ **Step 1 Notice:** Signature not in threat DB (404 Not Found). Cascading to Stage 2...")
+                    append_ui_log("VirusTotal 404 Not Found (not in threat registry). Cascading to Stage 2...")
+                    st.warning("⚠️ **Step 1 Notice:** VirusTotal has no record for this file. This is not a clean verdict.")
                 else:
-                    append_ui_log("VirusTotal: Clean / Unflagged signature.")
-                    st.write("✅ **Step 1 Clean:** No known threat flags found.")
+                    error_text = vt_res.error_message or vt_res.status.value
+                    append_ui_log(f"VirusTotal could not complete the check: {error_text}")
+                    st.warning(
+                        f"⚠️ **Step 1 Inconclusive:** {error_text}. "
+                        "Continuing to Stage 2, but this is not a malware-free result."
+                    )
 
                 # Step 2
                 append_ui_log("Step 2: Crawling vendor documentation via Tavily Web RAG...")
@@ -219,14 +244,14 @@ with tab_live:
                 # Step 3 Checkpoint
                 if stage2_res.verdict == VerificationVerdict.GENUINE:
                     status.update(label="Integrity Confirmed!", state="complete")
-                    st.success("### ✅ GENUINE, CLEAN DEPLOYMENT VERIFIED")
+                    st.success("### ✅ INTEGRITY MATCHED TO VENDOR CHECKSUM")
                     st.markdown(
                         f"""
                         - **Local Calculated SHA-256:** `{stage2_res.local_hash}`
                         - **Official Published SHA-256:** `{stage2_res.fetched_hash}`
                         - **Vendor Source:** `{stage2_res.vendor_domain or 'Official Vendor'}`
 
-                        **Verdict:** The downloaded binary mathematically matches the author's published checksum with 100% cryptographic precision.
+                        **Verdict:** The local file matches the checksum retrieved from the vendor source. This confirms integrity against that source; it does not independently prove the file is malware-free.
                         """
                     )
                 elif stage2_res.verdict == VerificationVerdict.TAMPERED:
@@ -255,6 +280,8 @@ with tab_live:
                     os.remove(temp_file_path)
             except Exception:
                 pass
+        elif uploaded_file and meta is None:
+            st.error("Metadata inspection failed. Verification cannot safely continue without a usable file identity.")
         else:
             st.info("Drop or select a file on the left and click 'Start Verification' to run the pipeline.")
 
