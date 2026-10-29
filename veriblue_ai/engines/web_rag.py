@@ -10,6 +10,7 @@ to isolate official vendor-published SHA-256 hashes and run cryptographic match 
 import os
 import re
 import time
+from urllib.parse import urlsplit
 from enum import Enum
 from typing import List, Dict, Any, Optional, Callable
 from dataclasses import dataclass, field
@@ -235,12 +236,14 @@ class WebRagEngine:
         tavily_api_key = (
             self.tavily_key or Config.get_tavily_key()
         )
-        ai_configured = Config.is_ai_configured()
+        provider = Config.get_ai_provider()
+        ai_configured = (
+            bool(Config.get_gemini_key())
+            if provider == "gemini"
+            else bool(self.openai_key or Config.get_openai_key())
+        )
 
-        if (
-            not tavily_api_key
-            or not Config.is_tavily_configured()
-        ):
+        if not tavily_api_key:
             msg = (
                 "Tavily API key is missing. Configure key in Settings "
                 "to enable Stage 2 web search."
@@ -266,6 +269,28 @@ class WebRagEngine:
                 verdict=VerificationVerdict.ERROR,
                 local_hash=local_hash,
                 summary_message=msg,
+            )
+
+        # Never verify against arbitrary search results when the parser
+        # cannot map the application to a known vendor domain.
+        trusted_domain = (metadata.suggested_domain or "").strip().lower().rstrip(".")
+        if not trusted_domain:
+            msg = (
+                "No trusted vendor domain could be identified for this file. "
+                "Automatic online verification is disabled to avoid trusting mirrors."
+            )
+            self._log("STAGE_2_WARNING", msg)
+            return Stage2Result(
+                verdict=VerificationVerdict.NOT_FOUND,
+                local_hash=local_hash,
+                summary_message=msg,
+            )
+
+        if not re.fullmatch(r"[0-9a-fA-F]{64}", local_hash):
+            return Stage2Result(
+                verdict=VerificationVerdict.ERROR,
+                local_hash=local_hash,
+                summary_message="Invalid local SHA-256 value; expected exactly 64 hexadecimal characters.",
             )
 
         # 1. Domain-restricted query formulation
@@ -328,23 +353,28 @@ class WebRagEngine:
         self.memory_cache.clear()
 
         primary_url = ""
-        trusted_domain = metadata.suggested_domain
 
         for item in results:
-            url = item.get("url", "")
+            url = str(item.get("url", "") or "")
+            parsed_url = urlsplit(url)
+            hostname = (parsed_url.hostname or "").lower().rstrip(".")
+            is_trusted_url = (
+                parsed_url.scheme == "https"
+                and bool(hostname)
+                and (hostname == trusted_domain or hostname.endswith("." + trusted_domain))
+                and parsed_url.username is None
+                and parsed_url.password is None
+            )
 
-            if not primary_url:
-                primary_url = url
-
-            if (
-                trusted_domain
-                and trusted_domain.lower() not in url.lower()
-            ):
+            if not is_trusted_url:
                 self._log(
                     "DYNAMIC_TRUST",
                     f"Ignoring untrusted mirror: {url}",
                 )
                 continue
+
+            if not primary_url:
+                primary_url = url
 
             content = (
                 item.get("raw_content")
@@ -366,14 +396,17 @@ class WebRagEngine:
         )
 
         if total_chunks == 0:
-            for item in results[:3]:
-                snippet = item.get("content", "")
-
-                if snippet:
-                    self.memory_cache.ingest_text(
-                        snippet,
-                        source_url=item.get("url", ""),
-                    )
+            return Stage2Result(
+                verdict=VerificationVerdict.NOT_FOUND,
+                local_hash=local_hash,
+                vendor_domain=trusted_domain,
+                search_query=query,
+                summary_message=(
+                    "No usable content was found on HTTPS pages belonging "
+                    "to the mapped vendor domain. Untrusted results were ignored."
+                ),
+                retrieved_chunks_count=0,
+            )
 
         context_block = self.memory_cache.get_ranked_context(
             keywords=[
@@ -455,108 +488,55 @@ class WebRagEngine:
         try:
             clean_res = "NOT_FOUND"
 
-            if (
-                provider == "gemini"
-                and Config.is_gemini_configured()
-            ):
+            if provider == "gemini":
                 import requests
-                import json
 
                 g_key = Config.get_gemini_key()
                 g_model = Config.get_gemini_model()
+                if not g_key:
+                    raise RuntimeError("Gemini API key is not configured.")
 
-                stream_url = (
-                    f"googleapis.com{g_model}:"
-                    f"streamGenerateContent?key={g_key}"
+                api_url = (
+                    "https://generativelanguage.googleapis.com/v1beta/models/"
+                    f"{g_model}:generateContent"
                 )
-
                 payload = {
-                    "contents": [
-                        {
-                            "parts": [
-                                {"text": user_prompt}
-                            ]
-                        }
-                    ],
+                    "contents": [{"parts": [{"text": user_prompt}]}],
                     "systemInstruction": {
-                        "parts": [
-                            {
-                                "text": self.RIGID_SYSTEM_PROMPT
-                            }
-                        ]
+                        "parts": [{"text": self.RIGID_SYSTEM_PROMPT}]
                     },
                     "generationConfig": {
                         "temperature": 0.0,
                         "maxOutputTokens": 100,
                     },
                 }
-
-                stream_response = requests.post(
-                    stream_url,
+                with requests.post(
+                    api_url,
+                    headers={"x-goog-api-key": g_key},
                     json=payload,
-                    timeout=(
-                        10,
-                        Config.get_http_timeout(),
-                    ),
-                    stream=True,
+                    timeout=Config.get_http_timeout(),
+                ) as response:
+                    response.raise_for_status()
+                    response_json = response.json()
+
+                candidates = response_json.get("candidates", [])
+                parts = (
+                    candidates[0].get("content", {}).get("parts", [])
+                    if candidates else []
                 )
-
-                if stream_response.status_code == 200:
-                    accumulator = []
-
-                    for line in stream_response.iter_lines():
-                        if not line:
-                            continue
-
-                        decoded_line = (
-                            line.decode("utf-8").strip()
-                        )
-
-                        if decoded_line.startswith('"text":'):
-                            p_match = re.search(
-                                r'"text":\s*"([^"]+)"',
-                                decoded_line,
-                            )
-
-                            if p_match:
-                                accumulator.append(
-                                    p_match.group(1)
-                                )
-
-                        elif len(decoded_line) > 5:
-                            try:
-                                if decoded_line.startswith(","):
-                                    decoded_line = decoded_line[1:]
-
-                                part_json = json.loads(decoded_line)
-
-                                text_data = (
-                                    part_json
-                                    .get("candidates", [{}])[0]
-                                    .get("content", {})
-                                    .get("parts", [{}])[0]
-                                    .get("text", "")
-                                )
-
-                                if text_data:
-                                    accumulator.append(text_data)
-
-                            except Exception:
-                                pass
-
-                    clean_res = "".join(accumulator)
-
-                else:
-                    raise RuntimeError(
-                        "Gemini API streaming channel returned "
-                        f"HTTP {stream_response.status_code}"
-                    )
-
+                clean_res = "".join(
+                    part.get("text", "")
+                    for part in parts
+                    if isinstance(part, dict)
+                )
             else:
-                openai_api_key = (
-                    self.openai_key
-                    or Config.get_openai_key()
-                )
+                if not HAS_LANGCHAIN:
+                    raise RuntimeError(
+                        "OpenAI provider requires langchain-openai and langchain-core."
+                    )
+                openai_api_key = self.openai_key or Config.get_openai_key()
+                if not openai_api_key:
+                    raise RuntimeError("OpenAI API key is not configured.")
 
                 llm = ChatOpenAI(
                     model=Config.get_openai_model(),
@@ -565,77 +545,59 @@ class WebRagEngine:
                     max_tokens=100,
                     request_timeout=Config.get_http_timeout(),
                 )
-
                 response = llm.invoke(
                     [
-                        SystemMessage(
-                            content=self.RIGID_SYSTEM_PROMPT
-                        ),
+                        SystemMessage(content=self.RIGID_SYSTEM_PROMPT),
                         HumanMessage(content=user_prompt),
                     ]
                 )
-
-                raw_text = (
-                    response.content
-                    if hasattr(response, "content")
-                    else str(response)
+                clean_res = str(
+                    response.content if hasattr(response, "content") else response
                 )
 
-                clean_res = str(raw_text)
-
-            clean_res = clean_res.strip().strip(
-                "'\"` \n\r\t"
-            )
-
-            hex_match = re.search(
-                r"\b([a-fA-F0-9]{64})\b",
-                clean_res,
-            )
-
-            if hex_match:
-                fetched_hash = hex_match.group(1).lower()
-
-            elif "NOT_FOUND" in clean_res.upper():
+            clean_res = clean_res.strip().strip("'\\"\x60 \\n\\r\\t")
+            if re.fullmatch(r"[a-fA-F0-9]{64}", clean_res):
+                fetched_hash = clean_res.lower()
+            elif clean_res.upper() == "NOT_FOUND":
                 fetched_hash = "NOT_FOUND"
-
             else:
                 fetched_hash = "NOT_FOUND"
+
+            # The extracted digest must actually appear in the retrieved vendor
+            # context. This prevents the model from inventing a plausible digest.
+            if fetched_hash != "NOT_FOUND":
+                context_hashes = {
+                    match.lower()
+                    for match in re.findall(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])", context_block)
+                }
+                if fetched_hash not in context_hashes:
+                    self._log(
+                        "STAGE_2_WARNING",
+                        "Model output was not present in retrieved vendor text; rejecting it.",
+                    )
+                    fetched_hash = "NOT_FOUND"
 
         except Exception as e:
-            err_msg = f"LLM extraction error: {str(e)}"
-
+            err_msg = f"LLM extraction error: {e}"
             self._log(
                 "STAGE_2_WARNING",
-                f"{err_msg}. Falling back to direct "
-                "deterministic context scan...",
+                f"{err_msg}. Using conservative deterministic fallback.",
             )
 
-            hex_match = re.search(
-                r"\b([a-fA-F0-9]{64})\b",
-                context_block,
-            )
-
-            if hex_match:
-                fetched_hash = hex_match.group(1).lower()
-
+            # A deterministic fallback is safe only when exactly one unique
+            # SHA-256 candidate exists in the trusted context.
+            context_hashes = list(dict.fromkeys(
+                match.lower()
+                for match in re.findall(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])", context_block)
+            ))
+            if len(context_hashes) == 1:
+                fetched_hash = context_hashes[0]
                 self._log(
                     "FALLBACK_EXTRACTION",
-                    "Deterministically extracted SHA-256 hash "
-                    f"from vendor context: {fetched_hash}",
+                    "Using the only SHA-256 candidate found in trusted vendor context.",
                 )
-
             else:
-                return Stage2Result(
-                    verdict=VerificationVerdict.NOT_FOUND,
-                    local_hash=local_hash,
-                    vendor_url=primary_url,
-                    vendor_domain=metadata.suggested_domain,
-                    search_query=query,
-                    summary_message=(
-                        "LLM unreachable and no 64-char hex found "
-                        f"in crawled page: {err_msg}"
-                    ),
-                )
+                fetched_hash = "NOT_FOUND"
 
         # 5. Cryptographic match engine
         self._log(
