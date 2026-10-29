@@ -242,12 +242,19 @@ class WebRagEngine:
         )
         provider = Config.get_ai_provider()
         ai_configured = (
-            bool(Config.get_gemini_key())
+            Config.is_gemini_configured()
             if provider == "gemini"
-            else bool(self.openai_key or Config.get_openai_key())
+            else (
+                Config.is_openai_configured()
+                or bool(
+                    self.openai_key
+                    and len(self.openai_key) > 10
+                    and not self.openai_key.startswith("your_")
+                )
+            )
         )
 
-        if not tavily_api_key:
+        if not tavily_api_key or len(tavily_api_key) <= 5 or tavily_api_key.startswith("your_"):
             msg = (
                 "Tavily API key is missing. Configure key in Settings "
                 "to enable Stage 2 web search."
@@ -295,6 +302,15 @@ class WebRagEngine:
                 verdict=VerificationVerdict.ERROR,
                 local_hash=local_hash,
                 summary_message="Invalid local SHA-256 value; expected exactly 64 hexadecimal characters.",
+            )
+
+        if not HAS_TAVILY:
+            msg = "The tavily-python package is missing. Install project requirements before using Stage 2."
+            self._log("STAGE_2_ERROR", msg)
+            return Stage2Result(
+                verdict=VerificationVerdict.ERROR,
+                local_hash=local_hash,
+                summary_message=msg,
             )
 
         # 1. Domain-restricted query formulation
@@ -585,23 +601,11 @@ class WebRagEngine:
             err_msg = f"LLM extraction error: {e}"
             self._log(
                 "STAGE_2_WARNING",
-                f"{err_msg}. Using conservative deterministic fallback.",
+                f"{err_msg}. Refusing to guess a vendor checksum.",
             )
-
-            # A deterministic fallback is safe only when exactly one unique
-            # SHA-256 candidate exists in the trusted context.
-            context_hashes = list(dict.fromkeys(
-                match.lower()
-                for match in re.findall(r"(?<![0-9a-fA-F])[0-9a-fA-F]{64}(?![0-9a-fA-F])", context_block)
-            ))
-            if len(context_hashes) == 1:
-                fetched_hash = context_hashes[0]
-                self._log(
-                    "FALLBACK_EXTRACTION",
-                    "Using the only SHA-256 candidate found in trusted vendor context.",
-                )
-            else:
-                fetched_hash = "NOT_FOUND"
+            # A failed model/API call cannot establish which hash belongs to
+            # this exact product release and architecture. Fail closed.
+            fetched_hash = "NOT_FOUND"
 
         # 5. Cryptographic match engine
         self._log(
