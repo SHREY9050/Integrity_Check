@@ -168,11 +168,11 @@ def _guess_vendor_domain(app_name: str, company: Optional[str] = None) -> Option
         check_terms.append(company.lower())
 
     for term in check_terms:
-        normalized_term = re.sub(r"\\s+", " ", term).strip()
+        normalized_term = re.sub(r"\s+", " ", term).strip()
         for key, domain in VENDOR_DOMAINS.items():
             # Match whole product/company phrases, not arbitrary substrings
             # (e.g. avoid mapping "notpython" to the Python vendor).
-            pattern = r"(?<![\\w])" + re.escape(key.lower()) + r"(?![\\w])"
+            pattern = r"(?<![\w])" + re.escape(key.lower()) + r"(?![\w])"
             if re.search(pattern, normalized_term):
                 return domain
     return None
