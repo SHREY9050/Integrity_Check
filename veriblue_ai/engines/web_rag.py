@@ -65,6 +65,10 @@ class EphemeralMemoryCache:
         chunk_size: int = 800,
         chunk_overlap: int = 150,
     ):
+        if chunk_size <= 0:
+            raise ValueError("chunk_size must be greater than zero.")
+        if chunk_overlap < 0 or chunk_overlap >= chunk_size:
+            raise ValueError("chunk_overlap must be between zero and chunk_size - 1.")
         self.chunk_size = chunk_size
         self.chunk_overlap = chunk_overlap
         self.documents: List[Dict[str, Any]] = []
