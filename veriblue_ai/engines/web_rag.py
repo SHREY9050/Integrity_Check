@@ -555,7 +555,7 @@ class WebRagEngine:
                     response.content if hasattr(response, "content") else response
                 )
 
-            clean_res = clean_res.strip().strip("'\\"\x60 \\n\\r\\t")
+            clean_res = clean_res.strip()
             if re.fullmatch(r"[a-fA-F0-9]{64}", clean_res):
                 fetched_hash = clean_res.lower()
             elif clean_res.upper() == "NOT_FOUND":
