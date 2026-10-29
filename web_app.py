@@ -178,7 +178,7 @@ with tab_live:
 
     with col2:
         st.subheader("2. Pipeline Stages & Verdict")
-        if uploaded_file and 'start_btn' in locals() and start_btn:
+        if uploaded_file and meta is not None and 'start_btn' in locals() and start_btn:
             log_container = st.empty()
             logs = []
 
@@ -232,14 +232,14 @@ with tab_live:
                 # Step 3 Checkpoint
                 if stage2_res.verdict == VerificationVerdict.GENUINE:
                     status.update(label="Integrity Confirmed!", state="complete")
-                    st.success("### ✅ GENUINE, CLEAN DEPLOYMENT VERIFIED")
+                    st.success("### ✅ INTEGRITY MATCHED TO VENDOR CHECKSUM")
                     st.markdown(
                         f"""
                         - **Local Calculated SHA-256:** `{stage2_res.local_hash}`
                         - **Official Published SHA-256:** `{stage2_res.fetched_hash}`
                         - **Vendor Source:** `{stage2_res.vendor_domain or 'Official Vendor'}`
 
-                        **Verdict:** The downloaded binary mathematically matches the author's published checksum with 100% cryptographic precision.
+                        **Verdict:** The local file matches the checksum retrieved from the vendor source. This confirms integrity against that source; it does not independently prove the file is malware-free.
                         """
                     )
                 elif stage2_res.verdict == VerificationVerdict.TAMPERED:
@@ -268,6 +268,8 @@ with tab_live:
                     os.remove(temp_file_path)
             except Exception:
                 pass
+        elif uploaded_file and meta is None:
+            st.error("Metadata inspection failed. Verification cannot safely continue without a usable file identity.")
         else:
             st.info("Drop or select a file on the left and click 'Start Verification' to run the pipeline.")
 
